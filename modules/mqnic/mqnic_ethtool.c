@@ -242,6 +242,21 @@ static int mqnic_set_rxfh(struct net_device *ndev, const u32 *indir,
 	return mqnic_update_indir_table(ndev);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+/* Adapt the new RSS callback arguments to the existing implementation. */
+static int mqnic_get_rxfh_compat(struct net_device *ndev,
+		struct ethtool_rxfh_param *rxfh)
+{
+	return mqnic_get_rxfh(ndev, rxfh->indir, rxfh->key, &rxfh->hfunc);
+}
+
+static int mqnic_set_rxfh_compat(struct net_device *ndev,
+		struct ethtool_rxfh_param *rxfh, struct netlink_ext_ack *extack)
+{
+	return mqnic_set_rxfh(ndev, rxfh->indir, rxfh->key, rxfh->hfunc);
+}
+#endif
+
 static void mqnic_get_channels(struct net_device *ndev,
 		struct ethtool_channels *channel)
 {
@@ -612,8 +627,13 @@ const struct ethtool_ops mqnic_ethtool_ops = {
 	.set_pauseparam = mqnic_set_pauseparam,
 	.get_rxnfc = mqnic_get_rxnfc,
 	.get_rxfh_indir_size = mqnic_get_rxfh_indir_size,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+	.get_rxfh = mqnic_get_rxfh_compat,
+	.set_rxfh = mqnic_set_rxfh_compat,
+#else
 	.get_rxfh = mqnic_get_rxfh,
 	.set_rxfh = mqnic_set_rxfh,
+#endif
 	.get_channels = mqnic_get_channels,
 	.set_channels = mqnic_set_channels,
 	.get_ts_info = mqnic_get_ts_info,
