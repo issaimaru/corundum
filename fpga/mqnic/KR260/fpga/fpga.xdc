@@ -124,3 +124,6 @@ create_generated_clock -name rgmii_tx_clk \
 #     -max $tx_max $tx_ports
 # set_output_delay -clock rgmii_tx_clk -clock_fall -add_delay \
 #     -min $tx_min $tx_ports
+
+set_property PACKAGE_PIN A12 [get_ports fan_en]
+set_property IOSTANDARD LVCMOS33 [get_ports fan_en]
