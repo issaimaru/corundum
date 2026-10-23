@@ -27,6 +27,10 @@ module fpga #
     // Board configuration
     parameter TDMA_BER_ENABLE = 0,
 
+    // this parameter is added by issaimaru
+    parameter TARGET = "XILINX",
+    parameter RX_INPUT_DELAY_PS = 0,
+
     // Structural configuration
     parameter IF_COUNT = 1,
     parameter PORTS_PER_IF = 1,
@@ -153,6 +157,17 @@ module fpga #
     output wire [1:0]   sfp_led,
 
     /*
+     * Ethernet: PL RGMII (https://docs.amd.com/r/en-US/pg138-axi-ethernet/Ethernet-Transceiver-Debug-Interface)
+     */
+    input  wire         rgmii_rx_clk,
+    input  wire [3:0]   rgmii_rxd,
+    input  wire         rgmii_rx_ctl,
+    output wire         rgmii_tx_clk,
+    output wire [3:0]   rgmii_txd,
+    output wire         rgmii_tx_ctl,
+    output wire         rgmii_reset_n,
+
+    /*
      * Ethernet: SFP+
      */
     input  wire         sfp_rx_p,
@@ -197,6 +212,11 @@ wire clk_156mhz_int;
 
 wire clk_125mhz_mmcm_out;
 
+wire clk90_125mhz_mmcm_out;
+wire clk90_125mhz_int;
+wire clk_312mhz_mmcm_out;
+wire clk_312mhz_int;
+
 // Internal 125 MHz clock
 wire clk_125mhz_int;
 wire rst_125mhz_int;
@@ -216,10 +236,10 @@ MMCME4_BASE #(
     .CLKOUT0_DIVIDE_F(10),
     .CLKOUT0_DUTY_CYCLE(0.5),
     .CLKOUT0_PHASE(0),
-    .CLKOUT1_DIVIDE(1),
+    .CLKOUT1_DIVIDE(10),
     .CLKOUT1_DUTY_CYCLE(0.5),
-    .CLKOUT1_PHASE(0),
-    .CLKOUT2_DIVIDE(1),
+    .CLKOUT1_PHASE(90),
+    .CLKOUT2_DIVIDE(4),
     .CLKOUT2_DUTY_CYCLE(0.5),
     .CLKOUT2_PHASE(0),
     .CLKOUT3_DIVIDE(1),
@@ -249,9 +269,9 @@ clk_mmcm_inst (
     .PWRDWN(1'b0),
     .CLKOUT0(clk_125mhz_mmcm_out),
     .CLKOUT0B(),
-    .CLKOUT1(),
+    .CLKOUT1(clk90_125mhz_mmcm_out),
     .CLKOUT1B(),
-    .CLKOUT2(),
+    .CLKOUT2(clk_312mhz_mmcm_out),
     .CLKOUT2B(),
     .CLKOUT3(),
     .CLKOUT3B(),
@@ -269,6 +289,18 @@ clk_125mhz_bufg_inst (
     .O(clk_125mhz_int)
 );
 
+BUFG
+clk90_125mhz_bufg_inst (
+    .I(clk90_125mhz_mmcm_out),
+    .O(clk90_125mhz_int)
+);
+
+BUFG
+clk_312mhz_bufg_inst (
+    .I(clk_312mhz_mmcm_out),
+    .O(clk_312mhz_int)
+);
+
 sync_reset #(
     .N(4)
 )
@@ -276,6 +308,27 @@ sync_reset_125mhz_inst (
     .clk(clk_125mhz_int),
     .rst(~mmcm_locked),
     .out(rst_125mhz_int)
+);
+
+// RGMII input timing and PHY startup
+wire [3:0] rgmii_rxd_delayed;
+wire rgmii_rx_ctl_delayed;
+wire eth_rst_125mhz;
+
+rgmii_phy_init #(
+    .RX_INPUT_DELAY_PS(RX_INPUT_DELAY_PS)
+)
+rgmii_phy_init_inst (
+    .clk_125mhz(clk_125mhz_int),
+    .rst_125mhz(rst_125mhz_int),
+    .clk_312mhz(clk_312mhz_int),
+    .mmcm_locked(mmcm_locked),
+    .rgmii_rxd(rgmii_rxd),
+    .rgmii_rx_ctl(rgmii_rx_ctl),
+    .rgmii_rxd_delayed(rgmii_rxd_delayed),
+    .rgmii_rx_ctl_delayed(rgmii_rx_ctl_delayed),
+    .eth_rst_125mhz(eth_rst_125mhz),
+    .rgmii_reset_n(rgmii_reset_n)
 );
 
 // GPIO
@@ -657,6 +710,7 @@ fpga_core #(
 
     // Board configuration
     .TDMA_BER_ENABLE(TDMA_BER_ENABLE),
+    .TARGET(TARGET),
 
     // Structural configuration
     .IF_COUNT(IF_COUNT),
@@ -788,6 +842,11 @@ core_inst (
     .clk_250mhz(zynq_pl_clk),
     .rst_250mhz(zynq_pl_reset),
 
+    // RGMII MAC clocks and calibrated reset
+    .clk_125mhz(clk_125mhz_int),
+    .clk90_125mhz(clk90_125mhz_int),
+    .rst_125mhz(eth_rst_125mhz),
+
     /*
      * PTP clock
      */
@@ -890,6 +949,16 @@ core_inst (
     .s_axil_app_ctrl_rresp(axil_app_ctrl_rresp),
     .s_axil_app_ctrl_rvalid(axil_app_ctrl_rvalid),
     .s_axil_app_ctrl_rready(axil_app_ctrl_rready),
+
+    /*
+     * Ethernet: RGMII
+     */
+    .rgmii_rx_clk(rgmii_rx_clk),
+    .rgmii_rxd(rgmii_rxd_delayed),
+    .rgmii_rx_ctl(rgmii_rx_ctl_delayed),
+    .rgmii_tx_clk(rgmii_tx_clk),
+    .rgmii_txd(rgmii_txd),
+    .rgmii_tx_ctl(rgmii_tx_ctl),
 
     /*
      * Ethernet: SFP+

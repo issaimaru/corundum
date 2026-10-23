@@ -326,7 +326,7 @@ rx_fifo (
     .s_clk(rx_clk),
     .s_rst(rx_rst),
     .s_axis_tdata(rx_fifo_axis_tdata),
-    .s_axis_tkeep(0),
+    .s_axis_tkeep(1'b1),
     .s_axis_tvalid(rx_fifo_axis_tvalid),
     .s_axis_tready(),
     .s_axis_tlast(rx_fifo_axis_tlast),

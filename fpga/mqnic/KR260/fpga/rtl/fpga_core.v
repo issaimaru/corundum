@@ -26,6 +26,7 @@ module fpga_core #
 
     // Board configuration
     parameter TDMA_BER_ENABLE = 0,
+    parameter TARGET = "XILINX",
 
     // Structural configuration
     parameter IF_COUNT = 1,
@@ -159,6 +160,11 @@ module fpga_core #
     input  wire                                 clk_250mhz,
     input  wire                                 rst_250mhz,
 
+    // RGMII MAC clocks and calibrated reset
+    input  wire                                 clk_125mhz,
+    input  wire                                 clk90_125mhz,
+    input  wire                                 rst_125mhz,
+
     /*
      * PTP clock
      */
@@ -261,6 +267,16 @@ module fpga_core #
     output wire [1:0]                           s_axil_app_ctrl_rresp,
     output wire                                 s_axil_app_ctrl_rvalid,
     input  wire                                 s_axil_app_ctrl_rready,
+
+    /*
+     * Ethernet: RGMII
+     */
+    input  wire                                 rgmii_rx_clk,
+    input  wire [3:0]                           rgmii_rxd,
+    input  wire                                 rgmii_rx_ctl,
+    output wire                                 rgmii_tx_clk,
+    output wire [3:0]                           rgmii_txd,
+    output wire                                 rgmii_tx_ctl,
 
     /*
      * Ethernet: SFP+
@@ -620,223 +636,316 @@ wire [PORT_COUNT*8-1:0]                       eth_rx_pfc_en;
 wire [PORT_COUNT*8-1:0]                       eth_rx_pfc_req;
 wire [PORT_COUNT*8-1:0]                       eth_rx_pfc_ack;
 
-wire [PORT_COUNT-1:0]                   port_xgmii_tx_clk;
-wire [PORT_COUNT-1:0]                   port_xgmii_tx_rst;
-wire [PORT_COUNT*XGMII_DATA_WIDTH-1:0]  port_xgmii_txd;
-wire [PORT_COUNT*XGMII_CTRL_WIDTH-1:0]  port_xgmii_txc;
+// 1G RGMII MAC; the NIC-facing AXI streams run at 250 MHz.
+assign sfp_txd = {8{8'h07}};
+assign sfp_txc = 8'hff;
 
-wire [PORT_COUNT-1:0]                   port_xgmii_rx_clk;
-wire [PORT_COUNT-1:0]                   port_xgmii_rx_rst;
-wire [PORT_COUNT*XGMII_DATA_WIDTH-1:0]  port_xgmii_rxd;
-wire [PORT_COUNT*XGMII_CTRL_WIDTH-1:0]  port_xgmii_rxc;
+assign eth_tx_clk = clk_250mhz;
+assign eth_tx_rst = rst_250mhz;
+assign eth_rx_clk = clk_250mhz;
+assign eth_rx_rst = rst_250mhz;
 
-mqnic_port_map_phy_xgmii #(
-    .PHY_COUNT(1),
-    .PORT_MASK(PORT_MASK),
-    .PORT_GROUP_SIZE(1),
+// Temporary status: these signals do not measure the PHY link.
+assign eth_tx_status = 1'b1;
+assign eth_rx_status = 1'b1;
 
-    .IF_COUNT(IF_COUNT),
-    .PORTS_PER_IF(PORTS_PER_IF),
+// The selected MAC does not return PTP timestamps.
+assign axis_eth_tx_ptp_ts = 0;
+assign axis_eth_tx_ptp_ts_tag = 0;
+assign axis_eth_tx_ptp_ts_valid = 1'b0;
+assign eth_rx_lfc_req = 1'b0;
+assign eth_rx_pfc_req = 8'd0;
 
-    .PORT_COUNT(PORT_COUNT),
+wire [1:0] mac_speed;
+wire mac_tx_underflow;
+wire mac_rx_bad_frame;
+wire mac_rx_bad_fcs;
+wire mac_tx_fifo_overflow;
+wire mac_rx_fifo_overflow;
 
-    .XGMII_DATA_WIDTH(XGMII_DATA_WIDTH),
-    .XGMII_CTRL_WIDTH(XGMII_CTRL_WIDTH)
-)
-mqnic_port_map_phy_xgmii_inst (
-    // towards PHY
-    .phy_xgmii_tx_clk({sfp_tx_clk}),
-    .phy_xgmii_tx_rst({sfp_tx_rst}),
-    .phy_xgmii_txd({sfp_txd}),
-    .phy_xgmii_txc({sfp_txc}),
-    .phy_tx_status(1'b1),
+eth_mac_1g_rgmii_fifo #(
+    .TARGET(TARGET),
+    .IODDR_STYLE("IODDR"),
+    .CLOCK_INPUT_STYLE("BUFG"),
+    .USE_CLK90("TRUE"),
+    .AXIS_DATA_WIDTH(AXIS_ETH_DATA_WIDTH),
+    .AXIS_KEEP_ENABLE(1),
+    .AXIS_KEEP_WIDTH(AXIS_ETH_KEEP_WIDTH),
+    .ENABLE_PADDING(ENABLE_PADDING),
+    .MIN_FRAME_LENGTH(MIN_FRAME_LENGTH),
+    .TX_FIFO_DEPTH(16384),
+    .TX_FRAME_FIFO(1),
+    .RX_FIFO_DEPTH(16384),
+    .RX_FRAME_FIFO(1)
+) eth_mac_inst (
+    // Clocks and resets
+    .gtx_clk(clk_125mhz),
+    .gtx_clk90(clk90_125mhz),
+    .gtx_rst(rst_125mhz),
+    .logic_clk(clk_250mhz),
+    .logic_rst(rst_250mhz),
 
-    .phy_xgmii_rx_clk({sfp_rx_clk}),
-    .phy_xgmii_rx_rst({sfp_rx_rst}),
-    .phy_xgmii_rxd({sfp_rxd}),
-    .phy_xgmii_rxc({sfp_rxc}),
-    .phy_rx_status({sfp_rx_status}),
+    // NIC transmit stream
+    .tx_axis_tdata(axis_eth_tx_tdata),
+    .tx_axis_tkeep(axis_eth_tx_tkeep),
+    .tx_axis_tvalid(axis_eth_tx_tvalid),
+    .tx_axis_tready(axis_eth_tx_tready),
+    .tx_axis_tlast(axis_eth_tx_tlast),
+    .tx_axis_tuser(axis_eth_tx_tuser[0]),
 
-    // towards MAC
-    .port_xgmii_tx_clk(port_xgmii_tx_clk),
-    .port_xgmii_tx_rst(port_xgmii_tx_rst),
-    .port_xgmii_txd(port_xgmii_txd),
-    .port_xgmii_txc(port_xgmii_txc),
-    .port_tx_status(eth_tx_status),
+    // NIC receive stream
+    .rx_axis_tdata(axis_eth_rx_tdata),
+    .rx_axis_tkeep(axis_eth_rx_tkeep),
+    .rx_axis_tvalid(axis_eth_rx_tvalid),
+    .rx_axis_tready(axis_eth_rx_tready),
+    .rx_axis_tlast(axis_eth_rx_tlast),
+    .rx_axis_tuser(axis_eth_rx_tuser),
 
-    .port_xgmii_rx_clk(port_xgmii_rx_clk),
-    .port_xgmii_rx_rst(port_xgmii_rx_rst),
-    .port_xgmii_rxd(port_xgmii_rxd),
-    .port_xgmii_rxc(port_xgmii_rxc),
-    .port_rx_status(eth_rx_status)
+    // External PHY interface
+    .rgmii_rx_clk(rgmii_rx_clk),
+    .rgmii_rxd(rgmii_rxd),
+    .rgmii_rx_ctl(rgmii_rx_ctl),
+    .rgmii_tx_clk(rgmii_tx_clk),
+    .rgmii_txd(rgmii_txd),
+    .rgmii_tx_ctl(rgmii_tx_ctl),
+
+    // Status for waveform inspection
+    .tx_error_underflow(mac_tx_underflow),
+    .tx_fifo_overflow(mac_tx_fifo_overflow),
+    .tx_fifo_bad_frame(),
+    .tx_fifo_good_frame(),
+    .rx_error_bad_frame(mac_rx_bad_frame),
+    .rx_error_bad_fcs(mac_rx_bad_fcs),
+    .rx_fifo_overflow(mac_rx_fifo_overflow),
+    .rx_fifo_bad_frame(),
+    .rx_fifo_good_frame(),
+    .speed(mac_speed),
+
+    .cfg_ifg(8'd12),
+    .cfg_tx_enable(1'b1),
+    .cfg_rx_enable(1'b1)
 );
 
-generate
-    genvar n;
+// // ここから10G NIC
+// wire [PORT_COUNT-1:0]                   port_xgmii_tx_clk;
+// wire [PORT_COUNT-1:0]                   port_xgmii_tx_rst;
+// wire [PORT_COUNT*XGMII_DATA_WIDTH-1:0]  port_xgmii_txd;
+// wire [PORT_COUNT*XGMII_CTRL_WIDTH-1:0]  port_xgmii_txc;
 
-    for (n = 0; n < PORT_COUNT; n = n + 1) begin : mac
+// wire [PORT_COUNT-1:0]                   port_xgmii_rx_clk;
+// wire [PORT_COUNT-1:0]                   port_xgmii_rx_rst;
+// wire [PORT_COUNT*XGMII_DATA_WIDTH-1:0]  port_xgmii_rxd;
+// wire [PORT_COUNT*XGMII_CTRL_WIDTH-1:0]  port_xgmii_rxc;
 
-        assign eth_tx_clk[n] = port_xgmii_tx_clk[n];
-        assign eth_tx_rst[n] = port_xgmii_tx_rst[n];
-        assign eth_rx_clk[n] = port_xgmii_rx_clk[n];
-        assign eth_rx_rst[n] = port_xgmii_rx_rst[n];
+// mqnic_port_map_phy_xgmii #(
+//     .PHY_COUNT(1),
+//     .PORT_MASK(PORT_MASK),
+//     .PORT_GROUP_SIZE(1),
 
-        eth_mac_10g #(
-            .DATA_WIDTH(AXIS_ETH_DATA_WIDTH),
-            .KEEP_WIDTH(AXIS_ETH_KEEP_WIDTH),
-            .ENABLE_PADDING(ENABLE_PADDING),
-            .ENABLE_DIC(ENABLE_DIC),
-            .MIN_FRAME_LENGTH(MIN_FRAME_LENGTH),
-            .PTP_PERIOD_NS(IF_PTP_PERIOD_NS),
-            .PTP_PERIOD_FNS(IF_PTP_PERIOD_FNS),
-            .TX_PTP_TS_ENABLE(PTP_TS_ENABLE),
-            .TX_PTP_TS_WIDTH(PTP_TS_WIDTH),
-            .TX_PTP_TS_CTRL_IN_TUSER(0),
-            .TX_PTP_TAG_ENABLE(PTP_TS_ENABLE),
-            .TX_PTP_TAG_WIDTH(TX_TAG_WIDTH),
-            .RX_PTP_TS_ENABLE(PTP_TS_ENABLE),
-            .RX_PTP_TS_WIDTH(PTP_TS_WIDTH),
-            .TX_USER_WIDTH(AXIS_ETH_TX_USER_WIDTH),
-            .RX_USER_WIDTH(AXIS_ETH_RX_USER_WIDTH),
-            .PFC_ENABLE(PFC_ENABLE),
-            .PAUSE_ENABLE(LFC_ENABLE)
-        )
-        eth_mac_inst (
-            .tx_clk(port_xgmii_tx_clk[n]),
-            .tx_rst(port_xgmii_tx_rst[n]),
-            .rx_clk(port_xgmii_rx_clk[n]),
-            .rx_rst(port_xgmii_rx_rst[n]),
+//     .IF_COUNT(IF_COUNT),
+//     .PORTS_PER_IF(PORTS_PER_IF),
 
-            /*
-             * AXI input
-             */
-            .tx_axis_tdata(axis_eth_tx_tdata[n*AXIS_ETH_DATA_WIDTH +: AXIS_ETH_DATA_WIDTH]),
-            .tx_axis_tkeep(axis_eth_tx_tkeep[n*AXIS_ETH_KEEP_WIDTH +: AXIS_ETH_KEEP_WIDTH]),
-            .tx_axis_tvalid(axis_eth_tx_tvalid[n +: 1]),
-            .tx_axis_tready(axis_eth_tx_tready[n +: 1]),
-            .tx_axis_tlast(axis_eth_tx_tlast[n +: 1]),
-            .tx_axis_tuser(axis_eth_tx_tuser[n*AXIS_ETH_TX_USER_WIDTH +: AXIS_ETH_TX_USER_WIDTH]),
+//     .PORT_COUNT(PORT_COUNT),
 
-            /*
-             * AXI output
-             */
-            .rx_axis_tdata(axis_eth_rx_tdata[n*AXIS_ETH_DATA_WIDTH +: AXIS_ETH_DATA_WIDTH]),
-            .rx_axis_tkeep(axis_eth_rx_tkeep[n*AXIS_ETH_KEEP_WIDTH +: AXIS_ETH_KEEP_WIDTH]),
-            .rx_axis_tvalid(axis_eth_rx_tvalid[n +: 1]),
-            .rx_axis_tlast(axis_eth_rx_tlast[n +: 1]),
-            .rx_axis_tuser(axis_eth_rx_tuser[n*AXIS_ETH_RX_USER_WIDTH +: AXIS_ETH_RX_USER_WIDTH]),
+//     .XGMII_DATA_WIDTH(XGMII_DATA_WIDTH),
+//     .XGMII_CTRL_WIDTH(XGMII_CTRL_WIDTH)
+// )
+// mqnic_port_map_phy_xgmii_inst (
+//     // towards PHY
+//     .phy_xgmii_tx_clk({sfp_tx_clk}),
+//     .phy_xgmii_tx_rst({sfp_tx_rst}),
+//     .phy_xgmii_txd({sfp_txd}),
+//     .phy_xgmii_txc({sfp_txc}),
+//     .phy_tx_status(1'b1),
 
-            /*
-             * XGMII interface
-             */
-            .xgmii_rxd(port_xgmii_rxd[n*XGMII_DATA_WIDTH +: XGMII_DATA_WIDTH]),
-            .xgmii_rxc(port_xgmii_rxc[n*XGMII_CTRL_WIDTH +: XGMII_CTRL_WIDTH]),
-            .xgmii_txd(port_xgmii_txd[n*XGMII_DATA_WIDTH +: XGMII_DATA_WIDTH]),
-            .xgmii_txc(port_xgmii_txc[n*XGMII_CTRL_WIDTH +: XGMII_CTRL_WIDTH]),
+//     .phy_xgmii_rx_clk({sfp_rx_clk}),
+//     .phy_xgmii_rx_rst({sfp_rx_rst}),
+//     .phy_xgmii_rxd({sfp_rxd}),
+//     .phy_xgmii_rxc({sfp_rxc}),
+//     .phy_rx_status({sfp_rx_status}),
 
-            /*
-             * PTP
-             */
-            .tx_ptp_ts(eth_tx_ptp_ts_tod[n*PTP_TS_WIDTH +: PTP_TS_WIDTH]),
-            .rx_ptp_ts(eth_rx_ptp_ts_tod[n*PTP_TS_WIDTH +: PTP_TS_WIDTH]),
-            .tx_axis_ptp_ts(axis_eth_tx_ptp_ts[n*PTP_TS_WIDTH +: PTP_TS_WIDTH]),
-            .tx_axis_ptp_ts_tag(axis_eth_tx_ptp_ts_tag[n*TX_TAG_WIDTH +: TX_TAG_WIDTH]),
-            .tx_axis_ptp_ts_valid(axis_eth_tx_ptp_ts_valid[n +: 1]),
+//     // towards MAC
+//     .port_xgmii_tx_clk(port_xgmii_tx_clk),
+//     .port_xgmii_tx_rst(port_xgmii_tx_rst),
+//     .port_xgmii_txd(port_xgmii_txd),
+//     .port_xgmii_txc(port_xgmii_txc),
+//     .port_tx_status(eth_tx_status),
 
-            /*
-             * Link-level Flow Control (LFC) (IEEE 802.3 annex 31B PAUSE)
-             */
-            .tx_lfc_req(eth_tx_lfc_req[n +: 1]),
-            .tx_lfc_resend(1'b0),
-            .rx_lfc_en(eth_rx_lfc_en[n +: 1]),
-            .rx_lfc_req(eth_rx_lfc_req[n +: 1]),
-            .rx_lfc_ack(eth_rx_lfc_ack[n +: 1]),
+//     .port_xgmii_rx_clk(port_xgmii_rx_clk),
+//     .port_xgmii_rx_rst(port_xgmii_rx_rst),
+//     .port_xgmii_rxd(port_xgmii_rxd),
+//     .port_xgmii_rxc(port_xgmii_rxc),
+//     .port_rx_status(eth_rx_status)
+// );
 
-            /*
-             * Priority Flow Control (PFC) (IEEE 802.3 annex 31D PFC)
-             */
-            .tx_pfc_req(eth_tx_pfc_req[n*8 +: 8]),
-            .tx_pfc_resend(1'b0),
-            .rx_pfc_en(eth_rx_pfc_en[n*8 +: 8]),
-            .rx_pfc_req(eth_rx_pfc_req[n*8 +: 8]),
-            .rx_pfc_ack(eth_rx_pfc_ack[n*8 +: 8]),
+// generate
+//     genvar n;
 
-            /*
-             * Pause interface
-             */
-            .tx_lfc_pause_en(1'b1),
-            .tx_pause_req(1'b0),
-            .tx_pause_ack(),
+//     for (n = 0; n < PORT_COUNT; n = n + 1) begin : mac
 
-            /*
-             * Status
-             */
-            .tx_start_packet(),
-            .tx_error_underflow(),
-            .rx_start_packet(),
-            .rx_error_bad_frame(),
-            .rx_error_bad_fcs(),
-            .stat_tx_mcf(),
-            .stat_rx_mcf(),
-            .stat_tx_lfc_pkt(),
-            .stat_tx_lfc_xon(),
-            .stat_tx_lfc_xoff(),
-            .stat_tx_lfc_paused(),
-            .stat_tx_pfc_pkt(),
-            .stat_tx_pfc_xon(),
-            .stat_tx_pfc_xoff(),
-            .stat_tx_pfc_paused(),
-            .stat_rx_lfc_pkt(),
-            .stat_rx_lfc_xon(),
-            .stat_rx_lfc_xoff(),
-            .stat_rx_lfc_paused(),
-            .stat_rx_pfc_pkt(),
-            .stat_rx_pfc_xon(),
-            .stat_rx_pfc_xoff(),
-            .stat_rx_pfc_paused(),
+//         assign eth_tx_clk[n] = port_xgmii_tx_clk[n];
+//         assign eth_tx_rst[n] = port_xgmii_tx_rst[n];
+//         assign eth_rx_clk[n] = port_xgmii_rx_clk[n];
+//         assign eth_rx_rst[n] = port_xgmii_rx_rst[n];
 
-            /*
-             * Configuration
-             */
-            .cfg_ifg(8'd12),
-            .cfg_tx_enable(eth_tx_enable[n +: 1]),
-            .cfg_rx_enable(eth_rx_enable[n +: 1]),
-            .cfg_mcf_rx_eth_dst_mcast(48'h01_80_C2_00_00_01),
-            .cfg_mcf_rx_check_eth_dst_mcast(1'b1),
-            .cfg_mcf_rx_eth_dst_ucast(48'd0),
-            .cfg_mcf_rx_check_eth_dst_ucast(1'b0),
-            .cfg_mcf_rx_eth_src(48'd0),
-            .cfg_mcf_rx_check_eth_src(1'b0),
-            .cfg_mcf_rx_eth_type(16'h8808),
-            .cfg_mcf_rx_opcode_lfc(16'h0001),
-            .cfg_mcf_rx_check_opcode_lfc(eth_rx_lfc_en[n +: 1]),
-            .cfg_mcf_rx_opcode_pfc(16'h0101),
-            .cfg_mcf_rx_check_opcode_pfc(eth_rx_pfc_en[n*8 +: 8] != 0),
-            .cfg_mcf_rx_forward(1'b0),
-            .cfg_mcf_rx_enable(eth_rx_lfc_en[n +: 1] || eth_rx_pfc_en[n*8 +: 8]),
-            .cfg_tx_lfc_eth_dst(48'h01_80_C2_00_00_01),
-            .cfg_tx_lfc_eth_src(48'h80_23_31_43_54_4C),
-            .cfg_tx_lfc_eth_type(16'h8808),
-            .cfg_tx_lfc_opcode(16'h0001),
-            .cfg_tx_lfc_en(eth_tx_lfc_en[n +: 1]),
-            .cfg_tx_lfc_quanta(16'hffff),
-            .cfg_tx_lfc_refresh(16'h7fff),
-            .cfg_tx_pfc_eth_dst(48'h01_80_C2_00_00_01),
-            .cfg_tx_pfc_eth_src(48'h80_23_31_43_54_4C),
-            .cfg_tx_pfc_eth_type(16'h8808),
-            .cfg_tx_pfc_opcode(16'h0101),
-            .cfg_tx_pfc_en(eth_tx_pfc_en[n*8 +: 8] != 0),
-            .cfg_tx_pfc_quanta({8{16'hffff}}),
-            .cfg_tx_pfc_refresh({8{16'h7fff}}),
-            .cfg_rx_lfc_opcode(16'h0001),
-            .cfg_rx_lfc_en(eth_rx_lfc_en[n +: 1]),
-            .cfg_rx_pfc_opcode(16'h0101),
-            .cfg_rx_pfc_en(eth_rx_pfc_en[n*8 +: 8] != 0)
-        );
+//         eth_mac_10g #(
+//             .DATA_WIDTH(AXIS_ETH_DATA_WIDTH),
+//             .KEEP_WIDTH(AXIS_ETH_KEEP_WIDTH),
+//             .ENABLE_PADDING(ENABLE_PADDING),
+//             .ENABLE_DIC(ENABLE_DIC),
+//             .MIN_FRAME_LENGTH(MIN_FRAME_LENGTH),
+//             .PTP_PERIOD_NS(IF_PTP_PERIOD_NS),
+//             .PTP_PERIOD_FNS(IF_PTP_PERIOD_FNS),
+//             .TX_PTP_TS_ENABLE(PTP_TS_ENABLE),
+//             .TX_PTP_TS_WIDTH(PTP_TS_WIDTH),
+//             .TX_PTP_TS_CTRL_IN_TUSER(0),
+//             .TX_PTP_TAG_ENABLE(PTP_TS_ENABLE),
+//             .TX_PTP_TAG_WIDTH(TX_TAG_WIDTH),
+//             .RX_PTP_TS_ENABLE(PTP_TS_ENABLE),
+//             .RX_PTP_TS_WIDTH(PTP_TS_WIDTH),
+//             .TX_USER_WIDTH(AXIS_ETH_TX_USER_WIDTH),
+//             .RX_USER_WIDTH(AXIS_ETH_RX_USER_WIDTH),
+//             .PFC_ENABLE(PFC_ENABLE),
+//             .PAUSE_ENABLE(LFC_ENABLE)
+//         )
+//         eth_mac_inst (
+//             .tx_clk(port_xgmii_tx_clk[n]),
+//             .tx_rst(port_xgmii_tx_rst[n]),
+//             .rx_clk(port_xgmii_rx_clk[n]),
+//             .rx_rst(port_xgmii_rx_rst[n]),
 
-    end
+//             /*
+//              * AXI input
+//              */
+//             .tx_axis_tdata(axis_eth_tx_tdata[n*AXIS_ETH_DATA_WIDTH +: AXIS_ETH_DATA_WIDTH]),
+//             .tx_axis_tkeep(axis_eth_tx_tkeep[n*AXIS_ETH_KEEP_WIDTH +: AXIS_ETH_KEEP_WIDTH]),
+//             .tx_axis_tvalid(axis_eth_tx_tvalid[n +: 1]),
+//             .tx_axis_tready(axis_eth_tx_tready[n +: 1]),
+//             .tx_axis_tlast(axis_eth_tx_tlast[n +: 1]),
+//             .tx_axis_tuser(axis_eth_tx_tuser[n*AXIS_ETH_TX_USER_WIDTH +: AXIS_ETH_TX_USER_WIDTH]),
 
-endgenerate
+//             /*
+//              * AXI output
+//              */
+//             .rx_axis_tdata(axis_eth_rx_tdata[n*AXIS_ETH_DATA_WIDTH +: AXIS_ETH_DATA_WIDTH]),
+//             .rx_axis_tkeep(axis_eth_rx_tkeep[n*AXIS_ETH_KEEP_WIDTH +: AXIS_ETH_KEEP_WIDTH]),
+//             .rx_axis_tvalid(axis_eth_rx_tvalid[n +: 1]),
+//             .rx_axis_tlast(axis_eth_rx_tlast[n +: 1]),
+//             .rx_axis_tuser(axis_eth_rx_tuser[n*AXIS_ETH_RX_USER_WIDTH +: AXIS_ETH_RX_USER_WIDTH]),
+
+//             /*
+//              * XGMII interface
+//              */
+//             .xgmii_rxd(port_xgmii_rxd[n*XGMII_DATA_WIDTH +: XGMII_DATA_WIDTH]),
+//             .xgmii_rxc(port_xgmii_rxc[n*XGMII_CTRL_WIDTH +: XGMII_CTRL_WIDTH]),
+//             .xgmii_txd(port_xgmii_txd[n*XGMII_DATA_WIDTH +: XGMII_DATA_WIDTH]),
+//             .xgmii_txc(port_xgmii_txc[n*XGMII_CTRL_WIDTH +: XGMII_CTRL_WIDTH]),
+
+//             /*
+//              * PTP
+//              */
+//             .tx_ptp_ts(eth_tx_ptp_ts_tod[n*PTP_TS_WIDTH +: PTP_TS_WIDTH]),
+//             .rx_ptp_ts(eth_rx_ptp_ts_tod[n*PTP_TS_WIDTH +: PTP_TS_WIDTH]),
+//             .tx_axis_ptp_ts(axis_eth_tx_ptp_ts[n*PTP_TS_WIDTH +: PTP_TS_WIDTH]),
+//             .tx_axis_ptp_ts_tag(axis_eth_tx_ptp_ts_tag[n*TX_TAG_WIDTH +: TX_TAG_WIDTH]),
+//             .tx_axis_ptp_ts_valid(axis_eth_tx_ptp_ts_valid[n +: 1]),
+
+//             /*
+//              * Link-level Flow Control (LFC) (IEEE 802.3 annex 31B PAUSE)
+//              */
+//             .tx_lfc_req(eth_tx_lfc_req[n +: 1]),
+//             .tx_lfc_resend(1'b0),
+//             .rx_lfc_en(eth_rx_lfc_en[n +: 1]),
+//             .rx_lfc_req(eth_rx_lfc_req[n +: 1]),
+//             .rx_lfc_ack(eth_rx_lfc_ack[n +: 1]),
+
+//             /*
+//              * Priority Flow Control (PFC) (IEEE 802.3 annex 31D PFC)
+//              */
+//             .tx_pfc_req(eth_tx_pfc_req[n*8 +: 8]),
+//             .tx_pfc_resend(1'b0),
+//             .rx_pfc_en(eth_rx_pfc_en[n*8 +: 8]),
+//             .rx_pfc_req(eth_rx_pfc_req[n*8 +: 8]),
+//             .rx_pfc_ack(eth_rx_pfc_ack[n*8 +: 8]),
+
+//             /*
+//              * Pause interface
+//              */
+//             .tx_lfc_pause_en(1'b1),
+//             .tx_pause_req(1'b0),
+//             .tx_pause_ack(),
+
+//             /*
+//              * Status
+//              */
+//             .tx_start_packet(),
+//             .tx_error_underflow(),
+//             .rx_start_packet(),
+//             .rx_error_bad_frame(),
+//             .rx_error_bad_fcs(),
+//             .stat_tx_mcf(),
+//             .stat_rx_mcf(),
+//             .stat_tx_lfc_pkt(),
+//             .stat_tx_lfc_xon(),
+//             .stat_tx_lfc_xoff(),
+//             .stat_tx_lfc_paused(),
+//             .stat_tx_pfc_pkt(),
+//             .stat_tx_pfc_xon(),
+//             .stat_tx_pfc_xoff(),
+//             .stat_tx_pfc_paused(),
+//             .stat_rx_lfc_pkt(),
+//             .stat_rx_lfc_xon(),
+//             .stat_rx_lfc_xoff(),
+//             .stat_rx_lfc_paused(),
+//             .stat_rx_pfc_pkt(),
+//             .stat_rx_pfc_xon(),
+//             .stat_rx_pfc_xoff(),
+//             .stat_rx_pfc_paused(),
+
+//             /*
+//              * Configuration
+//              */
+//             .cfg_ifg(8'd12),
+//             .cfg_tx_enable(eth_tx_enable[n +: 1]),
+//             .cfg_rx_enable(eth_rx_enable[n +: 1]),
+//             .cfg_mcf_rx_eth_dst_mcast(48'h01_80_C2_00_00_01),
+//             .cfg_mcf_rx_check_eth_dst_mcast(1'b1),
+//             .cfg_mcf_rx_eth_dst_ucast(48'd0),
+//             .cfg_mcf_rx_check_eth_dst_ucast(1'b0),
+//             .cfg_mcf_rx_eth_src(48'd0),
+//             .cfg_mcf_rx_check_eth_src(1'b0),
+//             .cfg_mcf_rx_eth_type(16'h8808),
+//             .cfg_mcf_rx_opcode_lfc(16'h0001),
+//             .cfg_mcf_rx_check_opcode_lfc(eth_rx_lfc_en[n +: 1]),
+//             .cfg_mcf_rx_opcode_pfc(16'h0101),
+//             .cfg_mcf_rx_check_opcode_pfc(eth_rx_pfc_en[n*8 +: 8] != 0),
+//             .cfg_mcf_rx_forward(1'b0),
+//             .cfg_mcf_rx_enable(eth_rx_lfc_en[n +: 1] || eth_rx_pfc_en[n*8 +: 8]),
+//             .cfg_tx_lfc_eth_dst(48'h01_80_C2_00_00_01),
+//             .cfg_tx_lfc_eth_src(48'h80_23_31_43_54_4C),
+//             .cfg_tx_lfc_eth_type(16'h8808),
+//             .cfg_tx_lfc_opcode(16'h0001),
+//             .cfg_tx_lfc_en(eth_tx_lfc_en[n +: 1]),
+//             .cfg_tx_lfc_quanta(16'hffff),
+//             .cfg_tx_lfc_refresh(16'h7fff),
+//             .cfg_tx_pfc_eth_dst(48'h01_80_C2_00_00_01),
+//             .cfg_tx_pfc_eth_src(48'h80_23_31_43_54_4C),
+//             .cfg_tx_pfc_eth_type(16'h8808),
+//             .cfg_tx_pfc_opcode(16'h0101),
+//             .cfg_tx_pfc_en(eth_tx_pfc_en[n*8 +: 8] != 0),
+//             .cfg_tx_pfc_quanta({8{16'hffff}}),
+//             .cfg_tx_pfc_refresh({8{16'h7fff}}),
+//             .cfg_rx_lfc_opcode(16'h0001),
+//             .cfg_rx_lfc_en(eth_rx_lfc_en[n +: 1]),
+//             .cfg_rx_pfc_opcode(16'h0101),
+//             .cfg_rx_pfc_en(eth_rx_pfc_en[n*8 +: 8] != 0)
+//         );
+
+//     end
+
+// endgenerate
+
+// // ここまで10G NIC
 
 mqnic_core_axi #(
     // FW and board IDs
@@ -967,7 +1076,7 @@ mqnic_core_axi #(
     .AXIS_SYNC_DATA_WIDTH(AXIS_ETH_SYNC_DATA_WIDTH),
     .AXIS_TX_USER_WIDTH(AXIS_ETH_TX_USER_WIDTH),
     .AXIS_RX_USER_WIDTH(AXIS_ETH_RX_USER_WIDTH),
-    .AXIS_RX_USE_READY(0),
+    .AXIS_RX_USE_READY(1),
     .AXIS_TX_PIPELINE(AXIS_ETH_TX_PIPELINE),
     .AXIS_TX_FIFO_PIPELINE(AXIS_ETH_TX_FIFO_PIPELINE),
     .AXIS_TX_TS_PIPELINE(AXIS_ETH_TX_TS_PIPELINE),
