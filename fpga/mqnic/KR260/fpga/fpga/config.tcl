@@ -48,6 +48,7 @@ dict set params RELEASE_INFO  [format "32'h%08x" $release_info]
 
 # Board configuration
 dict set params TDMA_BER_ENABLE "0"
+dict set params RX_INPUT_DELAY_PS "700"
 
 # Structural configuration
 dict set params IF_COUNT "1"

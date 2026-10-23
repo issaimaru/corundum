@@ -64,13 +64,13 @@ set_output_delay 0 [get_ports rgmii_reset_n]
 # IODELAY_GROUP is already assigned in rtl/rgmii_phy_init.v.
 # Keep RX_INPUT_DELAY_PS under RTL control; do not override DELAY_VALUE here.
 
-# External RGMII timing: initial 1 Gbps, PHY RX/TX internal delay disabled.
+# External RGMII timing: 1 Gbps, PHY RX clock delay 2.0 ns, TX delay disabled.
 # The FPGA supplies the TX clock skew with CLKOUT1_PHASE=90 / USE_CLK90=TRUE.
 # XDC describes this PHY configuration; it does not program the PHY registers.
-# Confirm this mode after reset before treating timing closure as board signoff.
+# Confirm the PHY registers after reset before enabling these constraints.
 #
 # PHY limits: TI DP83867CS, SNLS504G (June 2026), section 6.10:
-#   aligned-mode RX output skew: -0.5 to +0.5 ns
+#   shift-mode RX output setup/hold: 1.2 / 1.2 ns
 #   PHY TX input setup/hold requirement: 1.0 / 1.0 ns
 # https://www.ti.com/lit/ds/symlink/dp83867cs.pdf
 #
@@ -84,17 +84,17 @@ set_output_delay 0 [get_ports rgmii_reset_n]
 # example budget in TI SNLA243, section 3.3, and round the bounds outwards.
 # This is a design assumption, not a published KR260 carrier-card guarantee.
 # https://www.ti.com/lit/an/snla243/snla243.pdf
-#   RX limits = PHY skew + SoM skew + carrier skew = [-0.68077, +0.68418]
+#   RX setup/hold >= 1.2 - 0.08418 - 0.1 = 1.01582 ns; round down to 1.0 ns.
 #   TX PCB limits = SoM skew + carrier skew = [-0.15437, +0.21903]
 # Recalculate these limits if the PHY mode or carrier-card budget changes.
-# set RX_MIN_NS       -0.69
-# set RX_MAX_NS        0.69
+# set RX_SETUP_NS      1.0
+# set RX_HOLD_NS       1.0
 # set TX_SETUP_NS      1.0
 # set TX_HOLD_NS       1.0
 # set PCB_TX_MIN_NS   -0.16
 # set PCB_TX_MAX_NS    0.22
 
-# foreach key {RX_MIN_NS RX_MAX_NS TX_SETUP_NS TX_HOLD_NS PCB_TX_MIN_NS PCB_TX_MAX_NS} {
+# foreach key {RX_SETUP_NS RX_HOLD_NS TX_SETUP_NS TX_HOLD_NS PCB_TX_MIN_NS PCB_TX_MAX_NS} {
 #     if {![info exists $key] || ![string is double -strict [set $key]]} {
 #         error "Missing or invalid KR260 RGMII timing value: $key (ns)"
 #     }
@@ -109,12 +109,13 @@ create_generated_clock -name rgmii_tx_clk \
 # set tx_ports [get_ports {rgmii_txd[*] rgmii_tx_ctl}]
 
 # # External arrival times only; IDELAYE3 is already modelled inside the FPGA.
-# set_input_delay -clock rgmii_rx_clk -min $RX_MIN_NS $rx_ports
-# set_input_delay -clock rgmii_rx_clk -max $RX_MAX_NS $rx_ports
+# # Shift-mode DDR has a 4.0 ns half-cycle at 1 Gbps.
+# set_input_delay -clock rgmii_rx_clk -min $RX_HOLD_NS $rx_ports
+# set_input_delay -clock rgmii_rx_clk -max [expr {4.0 - $RX_SETUP_NS}] $rx_ports
 # set_input_delay -clock rgmii_rx_clk -clock_fall -add_delay \
-#     -min $RX_MIN_NS $rx_ports
+#     -min $RX_HOLD_NS $rx_ports
 # set_input_delay -clock rgmii_rx_clk -clock_fall -add_delay \
-#     -max $RX_MAX_NS $rx_ports
+#     -max [expr {4.0 - $RX_SETUP_NS}] $rx_ports
 
 # set tx_max [expr {$TX_SETUP_NS + $PCB_TX_MAX_NS}]
 # set tx_min [expr {-$TX_HOLD_NS + $PCB_TX_MIN_NS}]
